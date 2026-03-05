@@ -108,10 +108,6 @@ async def fetch_route(src: str, dst: str) -> dict:
     return {}
 
 # ============ ROUTES ============
-async def async_save_cache():
-    """Асинхронное сохранение — не блокирует ответ пользователю."""
-    import asyncio as _asyncio
-    await _asyncio.get_event_loop().run_in_executor(None, lambda: save_cache(_cache))
 
 @app.get("/api/route")
 async def get_route(src: str, dst: str):
@@ -123,7 +119,7 @@ async def get_route(src: str, dst: str):
         raise HTTPException(504, "Маршрут не найден — alta.ru не ответил")
     _cache[key] = data
     expand_cache(extract_segments(data))
-    asyncio.create_task(async_save_cache())
+    save_cache(_cache)
     return data
 
 
