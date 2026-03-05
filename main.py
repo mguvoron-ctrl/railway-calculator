@@ -14,19 +14,26 @@ app.add_middleware(
 
 ALTA_URL = "https://www.alta.ru/rail_tracking/engine.php"
 
+# Кэш в памяти сервера — общий для всех пользователей
+_cache: dict = {}
+
+def cache_key(src: str, dst: str) -> str:
+    a, b = sorted([src.strip(), dst.strip()])
+    return f"{a}||{b}"
+
 
 @app.get("/api/route")
 async def get_route(src: str, dst: str):
-    """Рассчитать расстояние между станциями"""
+    key = cache_key(src, dst)
+    if key in _cache:
+        return _cache[key]
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(ALTA_URL, params={
-                "action": "get_route",
-                "src": src,
-                "dst": dst,
-            })
+            resp = await client.get(ALTA_URL, params={"action": "get_route", "src": src, "dst": dst})
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            _cache[key] = data
+            return data
     except httpx.TimeoutException:
         raise HTTPException(504, "alta.ru не отвечает")
     except httpx.HTTPStatusError as e:
@@ -37,7 +44,7 @@ async def get_route(src: str, dst: str):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "cached_routes": len(_cache)}
 
 
 @app.get("/")
