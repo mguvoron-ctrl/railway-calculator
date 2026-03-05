@@ -80,7 +80,6 @@ def expand_cache(segments: list) -> None:
                                      "src": stations[i][0], "dst": stations[j][0]}}
 
 _cache: dict = load_cache()
-_dirty: int = 0  # счётчик несохранённых маршрутов
 
 # ============ ALTA FETCHING ============
 async def _fetch_alta(client: httpx.AsyncClient, src: str, dst: str) -> dict:
@@ -120,11 +119,8 @@ async def get_route(src: str, dst: str):
         raise HTTPException(504, "Маршрут не найден — alta.ru не ответил")
     _cache[key] = data
     expand_cache(extract_segments(data))
-    global _dirty
-    _dirty += 1
-    if _dirty >= 10:
-        save_cache(_cache)
-        _dirty = 0
+    import threading
+    threading.Thread(target=save_cache, args=(_cache.copy(),), daemon=True).start()
     return data
 
 
