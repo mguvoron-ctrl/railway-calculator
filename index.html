@@ -146,8 +146,6 @@ function MatrixTab({ onAddHistory, onAddStations }) {
           const { segments, dist } = await fetchRoute(src, dst, abortRef.current.signal);
           newRes[k] = dist;
           delete newErr[k];
-          onAddHistory({ from: src, to: dst, distance: dist, segments: segments.length,
-                         time: '0с', date: new Date().toLocaleString('ru') });
           onAddStations(segments);
         } catch (e) {
           if (!abortRef.current.signal.aborted) newErr[k] = true;
@@ -487,7 +485,9 @@ function App() {
         )}
 
         {/* МАТРИЦА */}
-        {tab === 'matrix' && <MatrixTab onAddHistory={addHistory} onAddStations={addStations} />}
+        <div style={{display: tab === 'matrix' ? 'block' : 'none'}}>
+          <MatrixTab onAddHistory={addHistory} onAddStations={addStations} />
+        </div>
 
         {/* СТАНЦИИ */}
         {tab === 'stations' && (
