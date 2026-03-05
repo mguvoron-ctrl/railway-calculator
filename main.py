@@ -74,7 +74,7 @@ def send_cache_backup():
         print(f"Ошибка отправки почты: {e}")
 
 _cache: dict = load_cache()
-_last_backup_day: int = -1
+_last_backup_half: int = -1
 
 def cache_key(src: str, dst: str) -> str:
     src = " ".join(src.split())
@@ -119,17 +119,18 @@ def cache_subroutes(segments: list):
                 }
 
 def maybe_send_daily_backup():
-    """Отправляет бэкап раз в день"""
-    global _last_backup_day
-    today = datetime.now().day
-    if today != _last_backup_day:
-        _last_backup_day = today
+    """Отправляет бэкап каждые 12 часов"""
+    global _last_backup_half
+    now = datetime.now()
+    half = now.day * 2 + (1 if now.hour >= 12 else 0)
+    if half != _last_backup_half:
+        _last_backup_half = half
         send_cache_backup()
 
 
 @app.get("/api/route")
 async def get_route(src: str, dst: str):
-    global _last_backup_day
+    global _last_backup_half
     key = cache_key(src, dst)
     if key in _cache:
         maybe_send_daily_backup()
