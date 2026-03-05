@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import httpx
+import json
+import os
 
 app = FastAPI(title="ЖД Калькулятор")
 
@@ -13,9 +15,26 @@ app.add_middleware(
 )
 
 ALTA_URL = "https://www.alta.ru/rail_tracking/engine.php"
+CACHE_FILE = "cache.json"
 
-# Кэш в памяти сервера — общий для всех пользователей
-_cache: dict = {}
+# Загружаем кэш с диска при старте
+def load_cache() -> dict:
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_cache(cache: dict):
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+_cache: dict = load_cache()
 
 def cache_key(src: str, dst: str) -> str:
     src = " ".join(src.split())
@@ -30,14 +49,8 @@ def extract_segments(data: dict) -> list:
     return []
 
 def cache_subroutes(segments: list):
-    """Кэширует все подмаршруты.
-    Маршрут A→B→C→D даст кэш для всех пар:
-    A→B, A→C, A→D, B→C, B→D, C→D (и обратно через sort в cache_key)
-    """
     if not segments:
         return
-
-    # Собираем список станций по порядку
     stations = []
     for s in segments:
         if not stations:
@@ -49,24 +62,19 @@ def cache_subroutes(segments: list):
         dist = 0
         sub_segs = []
         for j in range(i + 1, n):
-            # Сегмент между станцией j-1 и j
             seg = segments[j - 1]
             dist += seg.get("rst", 0)
             sub_segs.append(seg)
-
-            src_code, src_name = stations[i]
-            dst_code, dst_name = stations[j]
-            src_str = f"{src_code} {src_name}".strip()
-            dst_str = f"{dst_code} {dst_name}".strip()
+            src_str = " ".join(f"{stations[i][0]} {stations[i][1]}".split())
+            dst_str = " ".join(f"{stations[j][0]} {stations[j][1]}".split())
             key = cache_key(src_str, dst_str)
-
             if key not in _cache:
                 _cache[key] = {
                     "1": {
-                        "route": list(sub_segs),  # копия списка!
+                        "route": list(sub_segs),
                         "total_rst": dist,
-                        "src": src_code,
-                        "dst": dst_code,
+                        "src": stations[i][0],
+                        "dst": stations[j][0],
                     }
                 }
 
@@ -83,6 +91,7 @@ async def get_route(src: str, dst: str):
             data = resp.json()
             _cache[key] = data
             cache_subroutes(extract_segments(data))
+            save_cache(_cache)
             return data
     except httpx.TimeoutException:
         raise HTTPException(504, "alta.ru не отвечает")
@@ -97,14 +106,14 @@ async def health():
     return {"status": "ok", "cached_routes": len(_cache)}
 
 
-@app.get("/")
-async def root():
-    return FileResponse("index.html")
-
-
 @app.get("/debug")
 async def debug(src: str, dst: str):
     key = cache_key(src, dst)
     hit = key in _cache
     similar = [k for k in _cache.keys() if src.split()[0] in k or dst.split()[0] in k][:10]
     return {"key": key, "hit": hit, "similar_keys": similar}
+
+
+@app.get("/")
+async def root():
+    return FileResponse("index.html")
