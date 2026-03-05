@@ -9,12 +9,15 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <style>
-    body { background: #030712; color: #f9fafb; font-family: system-ui, sans-serif; margin: 0; }
-    * { box-sizing: border-box; }
-    input, select, button { font-family: inherit; }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; background: #030712; color: #f9fafb; font-family: system-ui, -apple-system, sans-serif; }
+    input, select, button, label { font-family: inherit; }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #1f2937; }
     ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+    .btn { border: none; border-radius: 8px; cursor: pointer; font-weight: 600; transition: opacity .15s; }
+    .btn:disabled { opacity: .4; cursor: default; }
+    .btn:hover:not(:disabled) { opacity: .85; }
   </style>
 </head>
 <body>
@@ -22,202 +25,221 @@
 <script type="text/babel">
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
-const API = '';
+// ============ CONSTANTS ============
+const API   = '';
+const BATCH = 8;  // параллельных запросов при расчёте матрицы
 
 // ============ STORAGE ============
-function load(key, fallback) {
-  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; }
-  catch { return fallback; }
-}
-function save(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-}
+const storage = {
+  load: (key, fb) => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fb; } catch { return fb; } },
+  save: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} },
+};
 
 // ============ API ============
 async function fetchRoute(src, dst, signal) {
   const url = `${API}/api/route?src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}`;
   const resp = await fetch(url, { signal });
-  if (!resp.ok) throw new Error(`Ошибка сервера: ${resp.status}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const data = await resp.json();
   if (data.detail) throw new Error(data.detail);
+
   const segments = [];
-  let totalDist = 0;
-  for (const key of Object.keys(data)) {
-    const item = data[key];
-    if (item && Array.isArray(item.route)) {
-      for (const s of item.route) {
-        if (s.rst !== undefined && s.st1_ecp && s.st2_ecp) {
-          segments.push({
-            st1_ecp: String(s.st1_ecp), st2_ecp: String(s.st2_ecp),
-            name1: s.name1 || '', name2: s.name2 || '',
-            rst: Number(s.rst), road1: s.road1 || '', road2: s.road2 || '',
-            lat1: s.lat1 || '', lon1: s.lon1 || '', lat2: s.lat2 || '', lon2: s.lon2 || '',
-          });
-          totalDist += Number(s.rst);
-        }
-      }
+  let dist = 0;
+  for (const item of Object.values(data)) {
+    if (!item || !Array.isArray(item.route)) continue;
+    for (const s of item.route) {
+      if (s.rst == null || !s.st1_ecp || !s.st2_ecp) continue;
+      segments.push({
+        st1_ecp: String(s.st1_ecp), st2_ecp: String(s.st2_ecp),
+        name1: s.name1 || '',       name2: s.name2 || '',
+        rst: Number(s.rst),
+        road1: s.road1 || '',       road2: s.road2 || '',
+        lat1: s.lat1 || '',         lon1: s.lon1 || '',
+        lat2: s.lat2 || '',         lon2: s.lon2 || '',
+      });
+      dist += Number(s.rst);
     }
   }
   if (!segments.length) throw new Error('Маршрут не найден');
-  return { segments, totalDist };
+  return { segments, dist };
 }
 
-// ============ PARSE EXCEL ============
+// ============ EXCEL PARSER ============
 function parseExcel(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = e => {
+    reader.onload = ({ target }) => {
       try {
-        const wb = XLSX.read(e.target.result, { type: 'array' });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+        const wb   = XLSX.read(target.result, { type: 'array' });
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '' });
         if (rows.length < 2) throw new Error('Файл пустой');
-
-        // Первая строка — заголовки столбцов (станции отправления), первый столбец — станции назначения
-        const colStations = rows[0].slice(1).map(s => String(s).trim()).filter(Boolean);
-        const rowStations = rows.slice(1).map(r => String(r[0] || '').trim()).filter(Boolean);
-
-        if (!colStations.length || !rowStations.length) throw new Error('Не найдены станции в файле');
-        resolve({ colStations, rowStations });
-      } catch(e) { reject(e); }
+        const cols = rows[0].slice(1).map(s => String(s).trim()).filter(Boolean);
+        const rws  = rows.slice(1).map(r => String(r[0] || '').trim()).filter(Boolean);
+        if (!cols.length || !rws.length) throw new Error('Станции не найдены');
+        resolve({ cols, rws });
+      } catch (e) { reject(e); }
     };
     reader.onerror = () => reject(new Error('Ошибка чтения файла'));
     reader.readAsArrayBuffer(file);
   });
 }
 
+// ============ SHARED STYLES ============
+const C = {
+  card:   { background: '#111827', borderRadius: 12, border: '1px solid #1f2937' },
+  input:  { background: '#1f2937', border: '1px solid #374151', borderRadius: 8,
+            padding: '10px 14px', color: '#fff', fontSize: 15, outline: 'none', width: '100%' },
+  btnPrimary: { background: '#2563eb', color: '#fff', padding: '12px', fontSize: 15 },
+  btnDanger:  { background: '#7f1d1d', color: '#fff', padding: '12px', fontSize: 15 },
+  btnGreen:   { background: '#14532d', color: '#fff', padding: '8px 14px', fontSize: 13 },
+  btnOrange:  { background: '#92400e', color: '#fff', padding: '8px 14px', fontSize: 13 },
+};
+
+// ============ TAB BUTTON ============
+const TabBtn = ({ id, label, active, onClick }) => (
+  <button onClick={onClick} style={{
+    padding: '10px 14px', fontSize: 13, fontWeight: 500, border: 'none',
+    borderBottom: active ? '2px solid #3b82f6' : '2px solid transparent',
+    color: active ? '#60a5fa' : '#6b7280', background: 'none', cursor: 'pointer', whiteSpace: 'nowrap',
+  }}>{label}</button>
+);
+
 // ============ MATRIX TAB ============
 function MatrixTab({ onAddHistory, onAddStations }) {
-  const [colStations, setColStations] = useState([]);
-  const [rowStations, setRowStations] = useState([]);
-  const [results, setResults] = useState({});   // key: "src||dst" -> km
-  const [errors, setErrors]   = useState({});
-  const [progress, setProgress] = useState(null); // {done, total}
+  const [cols, setCols]       = useState([]);
+  const [rows, setRows]       = useState([]);
+  const [results, setResults] = useState({});  // pairKey -> km
+  const [errors, setErrors]   = useState({});  // pairKey -> true
   const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
   const abortRef = useRef(null);
+
+  const pk = (src, dst) => `${src}|||${dst}`;
 
   const handleFile = async e => {
     const file = e.target.files[0];
     if (!file) return;
     try {
-      const { colStations: cols, rowStations: rows } = await parseExcel(file);
-      setColStations(cols);
-      setRowStations(rows);
-      setResults({});
-      setErrors({});
-      setProgress(null);
-    } catch(err) {
-      alert('Ошибка: ' + err.message);
-    }
+      const { cols: c, rws: r } = await parseExcel(file);
+      setCols(c); setRows(r);
+      setResults({}); setErrors({});
+      setProgress({ done: 0, total: 0 });
+    } catch (err) { alert('Ошибка: ' + err.message); }
     e.target.value = '';
   };
 
-  const pairKey = (src, dst) => `${src}|||${dst}`;
-
-  const calculate = async () => {
-    if (!colStations.length || !rowStations.length) return;
+  // Общая функция запуска — принимает список пар
+  const runPairs = async (pairs) => {
     abortRef.current = new AbortController();
     setRunning(true);
-    setResults({});
-    setErrors({});
-
-    // Собираем все уникальные пары (строка=назначение, столбец=отправление)
-    const pairs = [];
-    for (const dst of rowStations) {
-      for (const src of colStations) {
-        if (src !== dst) pairs.push({ src, dst });
-      }
-    }
-
     setProgress({ done: 0, total: pairs.length });
-    const newResults = {};
-    const newErrors  = {};
 
-    // Запрашиваем по 5 параллельно
-    const BATCH = 5;
+    const newRes = { ...results };
+    const newErr = { ...errors };
+    let done = 0;
+
     for (let i = 0; i < pairs.length; i += BATCH) {
       if (abortRef.current.signal.aborted) break;
-      const batch = pairs.slice(i, i + BATCH);
-      await Promise.all(batch.map(async ({ src, dst }) => {
-        const k = pairKey(src, dst);
+      await Promise.all(pairs.slice(i, i + BATCH).map(async ({ src, dst }) => {
+        const k = pk(src, dst);
         try {
-          const { segments, totalDist } = await fetchRoute(src, dst, abortRef.current.signal);
-          newResults[k] = totalDist;
-          // Добавляем в историю и базу станций
-          onAddHistory({ from: src, to: dst, distance: totalDist, segments: segments.length, time: '0с', date: new Date().toLocaleString('ru') });
+          const { segments, dist } = await fetchRoute(src, dst, abortRef.current.signal);
+          newRes[k] = dist;
+          delete newErr[k];
+          onAddHistory({ from: src, to: dst, distance: dist, segments: segments.length,
+                         time: '0с', date: new Date().toLocaleString('ru') });
           onAddStations(segments);
-        } catch(e) {
-          if (!abortRef.current.signal.aborted) newErrors[k] = true;
+        } catch (e) {
+          if (!abortRef.current.signal.aborted) newErr[k] = true;
         }
+        done++;
       }));
-      setResults({ ...newResults });
-      setErrors({ ...newErrors });
+      setResults({ ...newRes });
+      setErrors({ ...newErr });
       setProgress({ done: Math.min(i + BATCH, pairs.length), total: pairs.length });
     }
     setRunning(false);
-    setProgress(null);
+  };
+
+  const calculate = () => {
+    const pairs = [];
+    for (const dst of rows)
+      for (const src of cols)
+        if (src !== dst) pairs.push({ src, dst });
+    setResults({}); setErrors({});
+    runPairs(pairs);
+  };
+
+  const retryErrors = () => {
+    const pairs = Object.keys(errors).map(k => {
+      const [src, dst] = k.split('|||');
+      return { src, dst };
+    });
+    runPairs(pairs);
   };
 
   const stop = () => { abortRef.current?.abort(); setRunning(false); };
 
   const exportCSV = () => {
-    const rows = [['Назначение \\ Отправление', ...colStations]];
-    for (const dst of rowStations) {
-      const row = [dst];
-      for (const src of colStations) {
-        if (src === dst) { row.push('—'); continue; }
-        const k = pairKey(src, dst);
-        row.push(newResults?.[k] ?? (results[k] ?? (errors[k] ? 'Ошибка' : '')));
-      }
-      rows.push(row);
+    const csvRows = [['Назначение \\ Отправление', ...cols]];
+    for (const dst of rows) {
+      csvRows.push([dst, ...cols.map(src => {
+        if (src === dst) return '—';
+        const k = pk(src, dst);
+        return results[k] ?? (errors[k] ? 'Ошибка' : '');
+      })]);
     }
-    const blob = new Blob(['\ufeff' + rows.map(r => r.join(';')).join('\n')], { type: 'text/csv;charset=utf-8' });
+    const blob = new Blob(['\ufeff' + csvRows.map(r => r.join(';')).join('\n')], { type: 'text/csv;charset=utf-8' });
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'matrix.csv' });
     a.click(); URL.revokeObjectURL(a.href);
   };
 
-  const done  = Object.keys(results).length + Object.keys(errors).length;
-  const total = colStations.length * rowStations.length - Math.min(colStations.length, rowStations.length);
-  const pct   = total > 0 ? Math.round(done / total * 100) : 0;
+  const totalPairs  = cols.length * rows.length - Math.min(cols.length, rows.length);
+  const doneCount   = Object.keys(results).length + Object.keys(errors).length;
+  const errorCount  = Object.keys(errors).length;
+  const pct         = totalPairs > 0 ? Math.round(progress.done / progress.total * 100) : 0;
 
   return (
-    <div style={{display:'flex',flexDirection:'column',gap:16}}>
-      {/* Загрузка файла */}
-      <div style={{background:'#111827',borderRadius:12,padding:16,border:'1px solid #1f2937'}}>
-        <div style={{fontSize:13,color:'#9ca3af',marginBottom:10}}>
-          Загрузите Excel файл — первая строка: станции отправления, первый столбец: станции назначения.
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+      {/* Загрузка */}
+      <div style={{ ...C.card, padding: 16 }}>
+        <div style={{ fontSize: 13, color: '#9ca3af', marginBottom: 10 }}>
+          Excel файл: первая строка — станции отправления, первый столбец — станции назначения.
         </div>
-        <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
-          <label style={{padding:'8px 16px',background:'#1f2937',border:'1px solid #374151',borderRadius:8,color:'#d1d5db',cursor:'pointer',fontSize:13}}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <label className="btn" style={{ ...C.btnGreen, padding: '8px 16px', display: 'inline-block' }}>
             📂 Выбрать файл
-            <input type="file" accept=".xlsx,.xls" onChange={handleFile} style={{display:'none'}} />
+            <input type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ display: 'none' }} />
           </label>
-          {colStations.length > 0 && (
-            <span style={{fontSize:12,color:'#6b7280'}}>
-              {colStations.length} отпр. × {rowStations.length} назн. = {colStations.length * rowStations.length} пар
+          {cols.length > 0 && (
+            <span style={{ fontSize: 12, color: '#6b7280' }}>
+              {cols.length} отпр. × {rows.length} назн. = {totalPairs} пар
             </span>
           )}
         </div>
       </div>
 
       {/* Кнопки */}
-      {colStations.length > 0 && (
-        <div style={{display:'flex',gap:8}}>
+      {cols.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {!running ? (
-            <button onClick={calculate}
-              style={{flex:1,padding:'12px',background:'#2563eb',border:'none',borderRadius:8,color:'#fff',fontWeight:700,fontSize:15,cursor:'pointer'}}>
+            <button className="btn" onClick={calculate} style={{ ...C.btnPrimary, flex: 1 }}>
               🚀 Рассчитать матрицу
             </button>
           ) : (
-            <button onClick={stop}
-              style={{flex:1,padding:'12px',background:'#7f1d1d',border:'none',borderRadius:8,color:'#fff',fontWeight:700,fontSize:15,cursor:'pointer'}}>
+            <button className="btn" onClick={stop} style={{ ...C.btnDanger, flex: 1 }}>
               ⏹ Остановить
             </button>
           )}
-          {done > 0 && (
-            <button onClick={exportCSV}
-              style={{padding:'12px 16px',background:'#14532d',border:'none',borderRadius:8,color:'#fff',fontSize:13,cursor:'pointer'}}>
-              CSV
+          {errorCount > 0 && !running && (
+            <button className="btn" onClick={retryErrors} style={C.btnOrange}>
+              🔄 Повторить ошибки ({errorCount})
+            </button>
+          )}
+          {doneCount > 0 && (
+            <button className="btn" onClick={exportCSV} style={C.btnGreen}>
+              📥 CSV
             </button>
           )}
         </div>
@@ -225,49 +247,53 @@ function MatrixTab({ onAddHistory, onAddStations }) {
 
       {/* Прогресс */}
       {running && (
-        <div style={{background:'#111827',borderRadius:12,padding:12,border:'1px solid #1f2937'}}>
-          <div style={{display:'flex',justifyContent:'space-between',fontSize:13,color:'#9ca3af',marginBottom:6}}>
-            <span>Обработано {done} из {total}</span>
+        <div style={{ ...C.card, padding: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: '#9ca3af', marginBottom: 6 }}>
+            <span>{progress.done} из {progress.total}</span>
             <span>{pct}%</span>
           </div>
-          <div style={{background:'#1f2937',borderRadius:4,height:6}}>
-            <div style={{background:'#2563eb',borderRadius:4,height:6,width:`${pct}%`,transition:'width 0.3s'}} />
+          <div style={{ background: '#1f2937', borderRadius: 4, height: 6 }}>
+            <div style={{ background: '#2563eb', borderRadius: 4, height: 6, width: `${pct}%`, transition: 'width .3s' }} />
           </div>
         </div>
       )}
 
-      {/* Таблица результатов */}
-      {colStations.length > 0 && done > 0 && (
-        <div style={{background:'#111827',borderRadius:12,border:'1px solid #1f2937',overflow:'hidden'}}>
-          <div style={{overflowX:'auto',maxHeight:'60vh',overflowY:'auto'}}>
-            <table style={{fontSize:11,borderCollapse:'collapse',minWidth:'100%'}}>
-              <thead style={{background:'#1f2937',position:'sticky',top:0,zIndex:10}}>
+      {/* Таблица */}
+      {cols.length > 0 && doneCount > 0 && (
+        <div style={{ ...C.card, overflow: 'hidden' }}>
+          <div style={{ overflowX: 'auto', maxHeight: '60vh', overflowY: 'auto' }}>
+            <table style={{ fontSize: 11, borderCollapse: 'collapse', minWidth: '100%' }}>
+              <thead style={{ background: '#1f2937', position: 'sticky', top: 0, zIndex: 10 }}>
                 <tr>
-                  <th style={{padding:'6px 10px',color:'#6b7280',textAlign:'left',fontWeight:500,minWidth:160,position:'sticky',left:0,background:'#1f2937',zIndex:20}}>
-                    Назначение \ Отправление
+                  <th style={{ padding: '6px 10px', color: '#6b7280', textAlign: 'left', fontWeight: 500,
+                                minWidth: 160, position: 'sticky', left: 0, background: '#1f2937', zIndex: 20 }}>
+                    Назн. \ Отпр.
                   </th>
-                  {colStations.map((s,i) => (
-                    <th key={i} style={{padding:'6px 8px',color:'#9ca3af',fontWeight:500,minWidth:120,whiteSpace:'nowrap'}}>
+                  {cols.map((s, i) => (
+                    <th key={i} style={{ padding: '6px 8px', color: '#9ca3af', fontWeight: 500, minWidth: 120, whiteSpace: 'nowrap' }}>
                       {s}
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {rowStations.map((dst, ri) => (
-                  <tr key={ri} style={{borderTop:'1px solid rgba(31,41,55,0.5)'}}>
-                    <td style={{padding:'5px 10px',color:'#d1d5db',position:'sticky',left:0,background:'#111827',whiteSpace:'nowrap',fontWeight:500}}>
+                {rows.map((dst, ri) => (
+                  <tr key={ri} style={{ borderTop: '1px solid rgba(31,41,55,.5)' }}>
+                    <td style={{ padding: '5px 10px', color: '#d1d5db', position: 'sticky', left: 0,
+                                  background: '#111827', whiteSpace: 'nowrap', fontWeight: 500 }}>
                       {dst}
                     </td>
-                    {colStations.map((src, ci) => {
-                      if (src === dst) return <td key={ci} style={{padding:'5px 8px',textAlign:'right',color:'#374151'}}>—</td>;
-                      const k = pairKey(src, dst);
+                    {cols.map((src, ci) => {
+                      if (src === dst) return (
+                        <td key={ci} style={{ padding: '5px 8px', textAlign: 'right', color: '#374151' }}>—</td>
+                      );
+                      const k  = pk(src, dst);
                       const km = results[k];
                       const err = errors[k];
                       return (
-                        <td key={ci} style={{padding:'5px 8px',textAlign:'right',fontFamily:'monospace',
-                          color: err ? '#ef4444' : km !== undefined ? '#4ade80' : '#374151'}}>
-                          {err ? '✗' : km !== undefined ? km.toLocaleString() : '…'}
+                        <td key={ci} style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'monospace',
+                          color: err ? '#ef4444' : km != null ? '#4ade80' : '#374151' }}>
+                          {err ? '✗' : km != null ? km.toLocaleString() : '…'}
                         </td>
                       );
                     })}
@@ -276,8 +302,9 @@ function MatrixTab({ onAddHistory, onAddStations }) {
               </tbody>
             </table>
           </div>
-          <div style={{padding:'8px 12px',fontSize:11,color:'#4b5563',borderTop:'1px solid #1f2937'}}>
-            ✅ {Object.keys(results).length} маршрутов • ✗ {Object.keys(errors).length} ошибок
+          <div style={{ padding: '8px 12px', fontSize: 11, color: '#4b5563', borderTop: '1px solid #1f2937' }}>
+            ✅ {Object.keys(results).length} маршрутов
+            {errorCount > 0 && <span style={{ color: '#ef4444', marginLeft: 8 }}>✗ {errorCount} ошибок</span>}
           </div>
         </div>
       )}
@@ -287,26 +314,24 @@ function MatrixTab({ onAddHistory, onAddStations }) {
 
 // ============ APP ============
 function App() {
-  const [tab, setTab] = useState('calc');
-  const [src, setSrc] = useState('');
-  const [dst, setDst] = useState('');
+  const [tab, setTab]         = useState('calc');
+  const [src, setSrc]         = useState('');
+  const [dst, setDst]         = useState('');
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState('');
+  const [result, setResult]   = useState(null);
+  const [error, setError]     = useState('');
   const [showRoute, setShowRoute] = useState(false);
-
-  const [stations, setStations] = useState(() => new Map(load('rw_stations', [])));
-  const [history, setHistory]   = useState(() => load('rw_history', []));
-  const [stSearch, setStSearch] = useState('');
-  const [stSort, setStSort]     = useState('name');
-
+  const [stations, setStations]   = useState(() => new Map(storage.load('rw_stations', [])));
+  const [history, setHistory]     = useState(() => storage.load('rw_history', []));
+  const [stSearch, setStSearch]   = useState('');
+  const [stSort, setStSort]       = useState('name');
   const abortRef = useRef(null);
 
   useEffect(() => {
-    const t = setTimeout(() => save('rw_stations', [...stations.entries()]), 500);
+    const t = setTimeout(() => storage.save('rw_stations', [...stations.entries()]), 500);
     return () => clearTimeout(t);
   }, [stations]);
-  useEffect(() => { save('rw_history', history); }, [history]);
+  useEffect(() => { storage.save('rw_history', history); }, [history]);
 
   const addStations = useCallback(segments => {
     setStations(prev => {
@@ -332,19 +357,19 @@ function App() {
     setLoading(true); setError(''); setResult(null); setShowRoute(false);
     const t0 = performance.now();
     try {
-      const { segments, totalDist } = await fetchRoute(from, to, abortRef.current.signal);
+      const { segments, dist } = await fetchRoute(from, to, abortRef.current.signal);
       const elapsed = (performance.now() - t0) / 1000;
       addStations(segments);
-      setResult({ dist: totalDist, segs: segments.length, time: elapsed, route: segments });
-      addHistory({ from, to, distance: totalDist, segments: segments.length, time: elapsed.toFixed(1) + 'с', date: new Date().toLocaleString('ru') });
+      setResult({ dist, segs: segments.length, elapsed, route: segments });
+      addHistory({ from, to, distance: dist, segments: segments.length,
+                   time: elapsed.toFixed(1) + 'с', date: new Date().toLocaleString('ru') });
     } catch (e) {
-      if (abortRef.current?.signal.aborted) return;
-      setError(e.message || String(e));
+      if (!abortRef.current.signal.aborted) setError(e.message || String(e));
     } finally { setLoading(false); }
   }, [src, dst]);
 
-  const exportCSV = useCallback(() => {
-    const rows = [['Код', 'Станция', 'Дорога', 'Lat', 'Lon'], ...[...stations.values()].map(s => [s.code, s.name, s.road, s.lat, s.lon])];
+  const exportStCSV = useCallback(() => {
+    const rows = [['Код','Станция','Дорога','Lat','Lon'], ...[...stations.values()].map(s => [s.code, s.name, s.road, s.lat, s.lon])];
     const blob = new Blob(['\ufeff' + rows.map(r => r.join(';')).join('\n')], { type: 'text/csv;charset=utf-8' });
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'stations.csv' });
     a.click(); URL.revokeObjectURL(a.href);
@@ -354,111 +379,96 @@ function App() {
     const q = stSearch.toLowerCase();
     return [...stations.values()]
       .filter(s => !q || s.name.toLowerCase().includes(q) || s.code.includes(q) || s.road.toLowerCase().includes(q))
-      .sort((a, b) => stSort === 'code' ? a.code.localeCompare(b.code) : stSort === 'road' ? a.road.localeCompare(b.road) : a.name.localeCompare(b.name));
+      .sort((a, b) => {
+        if (stSort === 'code') return a.code.localeCompare(b.code);
+        if (stSort === 'road') return a.road.localeCompare(b.road);
+        return a.name.localeCompare(b.name);
+      });
   }, [stations, stSearch, stSort]);
 
-  const tabBtn = (key, label) => (
-    <button key={key} onClick={() => setTab(key)}
-      style={{padding:'10px 14px',fontSize:13,fontWeight:500,border:'none',borderBottom: tab===key ? '2px solid #3b82f6' : '2px solid transparent',
-        color: tab===key ? '#60a5fa' : '#6b7280',background:'none',cursor:'pointer',whiteSpace:'nowrap',transition:'color 0.2s'}}>
-      {label}
-    </button>
-  );
-
-  const S = {
-    page:    {minHeight:'100vh',background:'#030712',color:'#f9fafb'},
-    header:  {background:'#111827',borderBottom:'1px solid #1f2937',position:'sticky',top:0,zIndex:50},
-    hInner:  {maxWidth:960,margin:'0 auto',padding:'10px 16px',display:'flex',alignItems:'center',justifyContent:'space-between'},
-    nav:     {background:'rgba(17,24,39,0.5)',borderBottom:'1px solid #1f2937'},
-    navInner:{maxWidth:960,margin:'0 auto',padding:'0 16px',display:'flex',gap:2,overflowX:'auto'},
-    main:    {maxWidth:960,margin:'0 auto',padding:'20px 16px'},
-    card:    {background:'#111827',borderRadius:12,border:'1px solid #1f2937'},
-  };
-
   return (
-    <div style={S.page}>
-      <header style={S.header}>
-        <div style={S.hInner}>
-          <div style={{display:'flex',alignItems:'center',gap:8}}>
-            <span style={{fontSize:22}}>🚂</span>
-            <span style={{fontWeight:700,fontSize:15}}>ЖД Калькулятор</span>
+    <div style={{ minHeight: '100vh', background: '#030712' }}>
+
+      {/* HEADER */}
+      <header style={{ background: '#111827', borderBottom: '1px solid #1f2937', position: 'sticky', top: 0, zIndex: 50 }}>
+        <div style={{ maxWidth: 960, margin: '0 auto', padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 22 }}>🚂</span>
+            <span style={{ fontWeight: 700, fontSize: 15 }}>ЖД Калькулятор</span>
           </div>
-          <div style={{display:'flex',gap:6,fontSize:12}}>
-            <span style={{background:'#052e16',padding:'2px 8px',borderRadius:6,color:'#86efac'}}><b>{stations.size}</b> ст.</span>
-            <span style={{background:'#2e1065',padding:'2px 8px',borderRadius:6,color:'#c4b5fd'}}><b>{history.length}</b> запр.</span>
+          <div style={{ display: 'flex', gap: 6, fontSize: 12 }}>
+            <span style={{ background: '#052e16', padding: '2px 8px', borderRadius: 6, color: '#86efac' }}><b>{stations.size}</b> ст.</span>
+            <span style={{ background: '#2e1065', padding: '2px 8px', borderRadius: 6, color: '#c4b5fd' }}><b>{history.length}</b> запр.</span>
           </div>
         </div>
       </header>
 
-      <nav style={S.nav}>
-        <div style={S.navInner}>
-          {tabBtn('calc',    '📐 Расчёт')}
-          {tabBtn('matrix',  '📊 Матрица')}
-          {tabBtn('stations',`🏗 Станции (${stations.size})`)}
-          {tabBtn('history', `📋 История (${history.length})`)}
+      {/* NAV */}
+      <nav style={{ background: 'rgba(17,24,39,.5)', borderBottom: '1px solid #1f2937' }}>
+        <div style={{ maxWidth: 960, margin: '0 auto', padding: '0 16px', display: 'flex', gap: 2, overflowX: 'auto' }}>
+          {[['calc','📐 Расчёт'],['matrix','📊 Матрица'],['stations',`🏗 Станции (${stations.size})`],['history',`📋 История (${history.length})`]]
+            .map(([id, label]) => <TabBtn key={id} id={id} label={label} active={tab===id} onClick={() => setTab(id)} />)}
         </div>
       </nav>
 
-      <main style={S.main}>
+      {/* MAIN */}
+      <main style={{ maxWidth: 960, margin: '0 auto', padding: '20px 16px' }}>
 
-        {/* ---- РАСЧЁТ ---- */}
+        {/* РАСЧЁТ */}
         {tab === 'calc' && (
-          <div style={{display:'flex',flexDirection:'column',gap:16}}>
-            <div style={{...S.card,padding:16}}>
-              <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
-                <div style={{flex:1,minWidth:200}}>
-                  <label style={{fontSize:12,color:'#6b7280',display:'block',marginBottom:4}}>Отправление</label>
-                  <input value={src} onChange={e => setSrc(e.target.value)}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ ...C.card, padding: 16 }}>
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <label style={{ fontSize: 12, color: '#6b7280', display: 'block', marginBottom: 4 }}>Отправление</label>
+                  <input value={src} onChange={e => setSrc(e.target.value)} style={C.input}
                     onKeyDown={e => e.key === 'Enter' && document.getElementById('dst')?.focus()}
-                    placeholder="17640 Новосмоленская"
-                    style={{width:'100%',background:'#1f2937',border:'1px solid #374151',borderRadius:8,padding:'10px 14px',color:'#fff',fontSize:15,outline:'none'}} />
+                    placeholder="17640 Новосмоленская" />
                 </div>
-                <button onClick={() => { setSrc(dst); setDst(src); }}
-                  style={{alignSelf:'flex-end',padding:'10px 12px',background:'#1f2937',border:'none',borderRadius:8,color:'#9ca3af',fontSize:20,cursor:'pointer'}}>⇅</button>
-                <div style={{flex:1,minWidth:200}}>
-                  <label style={{fontSize:12,color:'#6b7280',display:'block',marginBottom:4}}>Назначение</label>
-                  <input id="dst" value={dst} onChange={e => setDst(e.target.value)}
+                <button className="btn" onClick={() => { setSrc(dst); setDst(src); }}
+                  style={{ alignSelf: 'flex-end', padding: '10px 12px', background: '#1f2937', color: '#9ca3af', fontSize: 20 }}>⇅</button>
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <label style={{ fontSize: 12, color: '#6b7280', display: 'block', marginBottom: 4 }}>Назначение</label>
+                  <input id="dst" value={dst} onChange={e => setDst(e.target.value)} style={C.input}
                     onKeyDown={e => e.key === 'Enter' && calculate()}
-                    placeholder="81850 Новоабзаково"
-                    style={{width:'100%',background:'#1f2937',border:'1px solid #374151',borderRadius:8,padding:'10px 14px',color:'#fff',fontSize:15,outline:'none'}} />
+                    placeholder="81850 Новоабзаково" />
                 </div>
               </div>
-              <button onClick={calculate} disabled={loading || !src.trim() || !dst.trim()}
-                style={{marginTop:12,width:'100%',padding:'12px',background: loading || !src.trim() || !dst.trim() ? '#374151' : '#2563eb',
-                  border:'none',borderRadius:8,color: loading || !src.trim() || !dst.trim() ? '#6b7280' : '#fff',fontWeight:700,fontSize:16,cursor: loading || !src.trim() || !dst.trim() ? 'default' : 'pointer'}}>
+              <button className="btn" onClick={calculate} disabled={loading || !src.trim() || !dst.trim()}
+                style={{ ...C.btnPrimary, marginTop: 12, width: '100%' }}>
                 {loading ? '⏳ Расчёт...' : '🚀 Рассчитать'}
               </button>
             </div>
 
             {result && (
-              <div style={{...S.card,overflow:'hidden'}}>
-                <div style={{padding:'20px',textAlign:'center'}}>
-                  <div style={{fontSize:48,fontWeight:900,color:'#4ade80'}}>{result.dist.toLocaleString()} км</div>
-                  <div style={{fontSize:13,color:'#6b7280',marginTop:6}}>{result.segs} перегонов • {result.time.toFixed(1)}с</div>
+              <div style={{ ...C.card, overflow: 'hidden' }}>
+                <div style={{ padding: 20, textAlign: 'center' }}>
+                  <div style={{ fontSize: 48, fontWeight: 900, color: '#4ade80' }}>{result.dist.toLocaleString()} км</div>
+                  <div style={{ fontSize: 13, color: '#6b7280', marginTop: 6 }}>{result.segs} перегонов • {result.elapsed.toFixed(1)}с</div>
                 </div>
-                <div style={{borderTop:'1px solid #1f2937'}}>
-                  <button onClick={() => setShowRoute(v => !v)}
-                    style={{width:'100%',padding:'8px 20px',background:'none',border:'none',color:'#9ca3af',cursor:'pointer',display:'flex',justifyContent:'space-between',fontSize:13}}>
+                <div style={{ borderTop: '1px solid #1f2937' }}>
+                  <button className="btn" onClick={() => setShowRoute(v => !v)}
+                    style={{ width: '100%', padding: '8px 20px', background: 'none', color: '#9ca3af', display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
                     <span>📍 Маршрут ({result.route.length})</span><span>{showRoute ? '▲' : '▼'}</span>
                   </button>
                   {showRoute && (
-                    <div style={{maxHeight:320,overflowY:'auto'}}>
-                      <table style={{width:'100%',fontSize:11,borderCollapse:'collapse'}}>
-                        <thead style={{background:'rgba(31,41,55,0.5)',position:'sticky',top:0}}>
+                    <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+                      <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
+                        <thead style={{ background: 'rgba(31,41,55,.5)', position: 'sticky', top: 0 }}>
                           <tr>{['#','Код','Станция','→','Код','Станция','Км'].map((h,i) => (
-                            <th key={i} style={{padding:'4px 6px',color:'#6b7280',textAlign:i===6?'right':'left',fontWeight:500}}>{h}</th>
+                            <th key={i} style={{ padding: '4px 6px', color: '#6b7280', textAlign: i===6?'right':'left', fontWeight: 500 }}>{h}</th>
                           ))}</tr>
                         </thead>
                         <tbody>
                           {result.route.map((s, i) => (
-                            <tr key={i} style={{borderTop:'1px solid rgba(31,41,55,0.5)'}}>
-                              <td style={{padding:'3px 6px',color:'#4b5563'}}>{i+1}</td>
-                              <td style={{padding:'3px 6px',color:'#6b7280',fontFamily:'monospace'}}>{s.st1_ecp}</td>
-                              <td style={{padding:'3px 6px',color:'#d1d5db'}}>{s.name1}</td>
-                              <td style={{padding:'3px 2px',color:'#4b5563'}}>→</td>
-                              <td style={{padding:'3px 6px',color:'#6b7280',fontFamily:'monospace'}}>{s.st2_ecp}</td>
-                              <td style={{padding:'3px 6px',color:'#d1d5db'}}>{s.name2}</td>
-                              <td style={{padding:'3px 6px',color:'#fbbf24',textAlign:'right',fontFamily:'monospace'}}>{s.rst}</td>
+                            <tr key={i} style={{ borderTop: '1px solid rgba(31,41,55,.5)' }}>
+                              <td style={{ padding: '3px 6px', color: '#4b5563' }}>{i+1}</td>
+                              <td style={{ padding: '3px 6px', color: '#6b7280', fontFamily: 'monospace' }}>{s.st1_ecp}</td>
+                              <td style={{ padding: '3px 6px', color: '#d1d5db' }}>{s.name1}</td>
+                              <td style={{ padding: '3px 2px', color: '#4b5563' }}>→</td>
+                              <td style={{ padding: '3px 6px', color: '#6b7280', fontFamily: 'monospace' }}>{s.st2_ecp}</td>
+                              <td style={{ padding: '3px 6px', color: '#d1d5db' }}>{s.name2}</td>
+                              <td style={{ padding: '3px 6px', color: '#fbbf24', textAlign: 'right', fontFamily: 'monospace' }}>{s.rst}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -468,85 +478,91 @@ function App() {
                 </div>
               </div>
             )}
-            {error && <div style={{background:'rgba(127,29,29,0.3)',border:'1px solid #7f1d1d',borderRadius:12,padding:'12px 20px',color:'#fca5a5'}}>{error}</div>}
+            {error && (
+              <div style={{ background: 'rgba(127,29,29,.3)', border: '1px solid #7f1d1d', borderRadius: 12, padding: '12px 20px', color: '#fca5a5' }}>
+                {error}
+              </div>
+            )}
           </div>
         )}
 
-        {/* ---- МАТРИЦА ---- */}
-        {tab === 'matrix' && (
-          <MatrixTab onAddHistory={addHistory} onAddStations={addStations} />
-        )}
+        {/* МАТРИЦА */}
+        {tab === 'matrix' && <MatrixTab onAddHistory={addHistory} onAddStations={addStations} />}
 
-        {/* ---- СТАНЦИИ ---- */}
+        {/* СТАНЦИИ */}
         {tab === 'stations' && (
-          <div style={{display:'flex',flexDirection:'column',gap:16}}>
-            <div style={{...S.card,padding:12,display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ ...C.card, padding: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
               <input value={stSearch} onChange={e => setStSearch(e.target.value)} placeholder="🔍 Поиск..."
-                style={{flex:1,minWidth:180,background:'#1f2937',border:'1px solid #374151',borderRadius:8,padding:'6px 12px',color:'#fff',fontSize:13,outline:'none'}} />
+                style={{ ...C.input, flex: 1, minWidth: 180, padding: '6px 12px', fontSize: 13 }} />
               <select value={stSort} onChange={e => setStSort(e.target.value)}
-                style={{background:'#1f2937',border:'1px solid #374151',borderRadius:8,padding:'6px 8px',color:'#fff',fontSize:13}}>
+                style={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8, padding: '6px 8px', color: '#fff', fontSize: 13 }}>
                 <option value="name">Имя</option>
                 <option value="code">Код</option>
                 <option value="road">Дорога</option>
               </select>
-              <button onClick={exportCSV} style={{padding:'6px 12px',background:'#14532d',border:'none',borderRadius:8,color:'#fff',fontSize:13,cursor:'pointer'}}>CSV</button>
+              <button className="btn" onClick={exportStCSV} style={C.btnGreen}>CSV</button>
             </div>
-            <div style={{...S.card,overflow:'hidden'}}>
-              <div style={{maxHeight:'60vh',overflowY:'auto'}}>
-                <table style={{width:'100%',fontSize:11,borderCollapse:'collapse'}}>
-                  <thead style={{background:'#1f2937',position:'sticky',top:0}}>
+            <div style={{ ...C.card, overflow: 'hidden' }}>
+              <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+                <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
+                  <thead style={{ background: '#1f2937', position: 'sticky', top: 0 }}>
                     <tr>{['Код','Станция','Дорога','Координаты','⚡'].map((h,i) => (
-                      <th key={i} style={{padding:'6px 8px',color:'#9ca3af',textAlign:'left',fontWeight:500}}>{h}</th>
+                      <th key={i} style={{ padding: '6px 8px', color: '#9ca3af', textAlign: 'left', fontWeight: 500 }}>{h}</th>
                     ))}</tr>
                   </thead>
                   <tbody>
-                    {filteredSt.slice(0,500).map(s => (
-                      <tr key={s.code} style={{borderTop:'1px solid rgba(31,41,55,0.5)'}}>
-                        <td style={{padding:'4px 8px',fontFamily:'monospace',color:'#60a5fa'}}>{s.code}</td>
-                        <td style={{padding:'4px 8px',color:'#e5e7eb'}}>{s.name}</td>
-                        <td style={{padding:'4px 8px',color:'#6b7280'}}>{s.road}</td>
-                        <td style={{padding:'4px 8px',color:'#4b5563',fontFamily:'monospace',fontSize:10}}>{s.lat && s.lon ? `${s.lat}, ${s.lon}` : '—'}</td>
-                        <td style={{padding:'4px 8px',textAlign:'center'}}>
-                          <button onClick={() => { setSrc(`${s.code} ${s.name}`); setTab('calc'); }} style={{background:'none',border:'none',cursor:'pointer',marginRight:4}} title="Отправление">📤</button>
-                          <button onClick={() => { setDst(`${s.code} ${s.name}`); setTab('calc'); }} style={{background:'none',border:'none',cursor:'pointer'}} title="Назначение">📥</button>
+                    {filteredSt.slice(0, 500).map(s => (
+                      <tr key={s.code} style={{ borderTop: '1px solid rgba(31,41,55,.5)' }}>
+                        <td style={{ padding: '4px 8px', fontFamily: 'monospace', color: '#60a5fa' }}>{s.code}</td>
+                        <td style={{ padding: '4px 8px', color: '#e5e7eb' }}>{s.name}</td>
+                        <td style={{ padding: '4px 8px', color: '#6b7280' }}>{s.road}</td>
+                        <td style={{ padding: '4px 8px', color: '#4b5563', fontFamily: 'monospace', fontSize: 10 }}>
+                          {s.lat && s.lon ? `${s.lat}, ${s.lon}` : '—'}
+                        </td>
+                        <td style={{ padding: '4px 8px', textAlign: 'center' }}>
+                          <button className="btn" onClick={() => { setSrc(`${s.code} ${s.name}`); setTab('calc'); }}
+                            style={{ background: 'none', marginRight: 4 }} title="Отправление">📤</button>
+                          <button className="btn" onClick={() => { setDst(`${s.code} ${s.name}`); setTab('calc'); }}
+                            style={{ background: 'none' }} title="Назначение">📥</button>
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-              {filteredSt.length > 500 && <div style={{padding:'8px',textAlign:'center',fontSize:12,color:'#6b7280'}}>Показано 500 из {filteredSt.length}</div>}
-              {filteredSt.length === 0 && <div style={{padding:'32px',textAlign:'center',color:'#4b5563'}}>{stations.size === 0 ? 'База пуста — сделайте первый расчёт' : 'Не найдено'}</div>}
+              {filteredSt.length > 500 && <div style={{ padding: 8, textAlign: 'center', fontSize: 12, color: '#6b7280' }}>Показано 500 из {filteredSt.length}</div>}
+              {filteredSt.length === 0 && <div style={{ padding: 32, textAlign: 'center', color: '#4b5563' }}>{stations.size === 0 ? 'База пуста — сделайте первый расчёт' : 'Не найдено'}</div>}
             </div>
           </div>
         )}
 
-        {/* ---- ИСТОРИЯ ---- */}
+        {/* ИСТОРИЯ */}
         {tab === 'history' && (
-          <div style={{...S.card,overflow:'hidden'}}>
-            <div style={{maxHeight:'70vh',overflowY:'auto'}}>
-              <table style={{width:'100%',fontSize:13,borderCollapse:'collapse'}}>
-                <thead style={{background:'#1f2937',position:'sticky',top:0}}>
+          <div style={{ ...C.card, overflow: 'hidden' }}>
+            <div style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+              <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+                <thead style={{ background: '#1f2937', position: 'sticky', top: 0 }}>
                   <tr>{['Дата','Откуда','Куда','Км','Перег.','Время'].map((h,i) => (
-                    <th key={i} style={{padding:'8px 12px',color:'#9ca3af',textAlign:i>=3?'right':'left',fontWeight:500}}>{h}</th>
+                    <th key={i} style={{ padding: '8px 12px', color: '#9ca3af', textAlign: i>=3?'right':'left', fontWeight: 500 }}>{h}</th>
                   ))}</tr>
                 </thead>
                 <tbody>
                   {history.map((h, i) => (
-                    <tr key={i} style={{borderTop:'1px solid rgba(31,41,55,0.5)',cursor:'pointer'}}
+                    <tr key={i} style={{ borderTop: '1px solid rgba(31,41,55,.5)', cursor: 'pointer' }}
                       onClick={() => { setSrc(h.from); setDst(h.to); setTab('calc'); }}>
-                      <td style={{padding:'8px 12px',color:'#4b5563',fontSize:11}}>{h.date}</td>
-                      <td style={{padding:'8px 12px',color:'#d1d5db'}}>{h.from}</td>
-                      <td style={{padding:'8px 12px',color:'#d1d5db'}}>{h.to}</td>
-                      <td style={{padding:'8px 12px',textAlign:'right',fontFamily:'monospace',color:'#4ade80',fontWeight:700}}>{h.distance.toLocaleString()}</td>
-                      <td style={{padding:'8px 12px',textAlign:'right',color:'#6b7280'}}>{h.segments}</td>
-                      <td style={{padding:'8px 12px',textAlign:'right',color:'#4b5563'}}>{h.time}</td>
+                      <td style={{ padding: '8px 12px', color: '#4b5563', fontSize: 11 }}>{h.date}</td>
+                      <td style={{ padding: '8px 12px', color: '#d1d5db' }}>{h.from}</td>
+                      <td style={{ padding: '8px 12px', color: '#d1d5db' }}>{h.to}</td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'monospace', color: '#4ade80', fontWeight: 700 }}>{h.distance.toLocaleString()}</td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right', color: '#6b7280' }}>{h.segments}</td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right', color: '#4b5563' }}>{h.time}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            {history.length === 0 && <div style={{padding:'32px',textAlign:'center',color:'#4b5563'}}>Пусто</div>}
+            {history.length === 0 && <div style={{ padding: 32, textAlign: 'center', color: '#4b5563' }}>Пусто</div>}
           </div>
         )}
       </main>
