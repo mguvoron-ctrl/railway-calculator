@@ -22,35 +22,35 @@ def cache_key(src: str, dst: str) -> str:
     return f"{a}||{b}"
 
 def extract_segments(data: dict) -> list:
-    """Извлекает список перегонов из ответа alta.ru"""
     for item in data.values():
         if isinstance(item, dict) and isinstance(item.get("route"), list):
             return item["route"]
     return []
 
 def cache_subroutes(segments: list):
-    """Кэширует все подмаршруты из списка перегонов.
-    Например маршрут A→B→C→D даст кэш для:
-    A→B, A→C, A→D, B→C, B→D, C→D (и обратно)
+    """Кэширует все подмаршруты.
+    Маршрут A→B→C→D даст кэш для всех пар:
+    A→B, A→C, A→D, B→C, B→D, C→D (и обратно через sort в cache_key)
     """
     if not segments:
         return
 
-    # Собираем список станций по порядку маршрута
+    # Собираем список станций по порядку
     stations = []
     for s in segments:
         if not stations:
             stations.append((s["st1_ecp"], s.get("name1", "")))
         stations.append((s["st2_ecp"], s.get("name2", "")))
 
-    # Для каждой пары станций собираем подмаршрут и кэшируем
-    for i in range(len(stations)):
+    n = len(stations)
+    for i in range(n):
         dist = 0
-        sub_segments = []
-        for j in range(i + 1, len(stations)):
+        sub_segs = []
+        for j in range(i + 1, n):
+            # Сегмент между станцией j-1 и j
             seg = segments[j - 1]
             dist += seg.get("rst", 0)
-            sub_segments.append(seg)
+            sub_segs.append(seg)
 
             src_code, src_name = stations[i]
             dst_code, dst_name = stations[j]
@@ -59,10 +59,9 @@ def cache_subroutes(segments: list):
             key = cache_key(src_str, dst_str)
 
             if key not in _cache:
-                # Формируем ответ в том же формате что отдаёт alta.ru
                 _cache[key] = {
                     "1": {
-                        "route": sub_segments,
+                        "route": list(sub_segs),  # копия списка!
                         "total_rst": dist,
                         "src": src_code,
                         "dst": dst_code,
@@ -81,7 +80,6 @@ async def get_route(src: str, dst: str):
             resp.raise_for_status()
             data = resp.json()
             _cache[key] = data
-            # Кэшируем все промежуточные подмаршруты
             cache_subroutes(extract_segments(data))
             return data
     except httpx.TimeoutException:
