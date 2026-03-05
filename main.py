@@ -1,10 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 import httpx
 import json
 import os
-from datetime import datetime
 
 app = FastAPI(title="ЖД Калькулятор")
 
@@ -17,10 +16,7 @@ app.add_middleware(
 
 ALTA_URL = "https://www.alta.ru/rail_tracking/engine.php"
 CACHE_FILE = "cache.json"
-
-# Настройки почты
-EMAIL_TO = "mguvoron@gmail.com"
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+BACKUP_KEY = os.getenv("BACKUP_KEY", "")
 
 
 def load_cache() -> dict:
@@ -39,37 +35,7 @@ def save_cache(cache: dict):
     except Exception:
         pass
 
-def send_cache_backup():
-    """Отправляет cache.json на почту через Resend"""
-    if not RESEND_API_KEY:
-        return
-    try:
-        import urllib.request
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        cache_str = json.dumps(_cache, ensure_ascii=False, indent=2)
-        # Resend не поддерживает вложения на бесплатном плане — шлём текстом
-        body = f"Резервная копия кэша маршрутов.\nМаршрутов в базе: {len(_cache)}\n\n{cache_str[:50000]}"
-        payload = json.dumps({
-            "from": "onboarding@resend.dev",
-            "to": EMAIL_TO,
-            "subject": f"ЖД Калькулятор — резервная копия {date_str}",
-            "text": body
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            "https://api.resend.com/emails",
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}",
-                "Content-Type": "application/json"
-            }
-        )
-        urllib.request.urlopen(req, timeout=10)
-        print(f"Бэкап отправлен на {EMAIL_TO}")
-    except Exception as e:
-        print(f"Ошибка отправки почты: {e}")
-
 _cache: dict = load_cache()
-_last_backup_half: int = -1
 
 def cache_key(src: str, dst: str) -> str:
     src = " ".join(src.split())
@@ -113,22 +79,11 @@ def cache_subroutes(segments: list):
                     }
                 }
 
-def maybe_send_daily_backup():
-    """Отправляет бэкап каждые 12 часов"""
-    global _last_backup_half
-    now = datetime.now()
-    half = now.day * 2 + (1 if now.hour >= 12 else 0)
-    if half != _last_backup_half:
-        _last_backup_half = half
-        send_cache_backup()
-
 
 @app.get("/api/route")
 async def get_route(src: str, dst: str):
-    global _last_backup_half
     key = cache_key(src, dst)
     if key in _cache:
-        maybe_send_daily_backup()
         return _cache[key]
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -138,7 +93,6 @@ async def get_route(src: str, dst: str):
             _cache[key] = data
             cache_subroutes(extract_segments(data))
             save_cache(_cache)
-            maybe_send_daily_backup()
             return data
     except httpx.TimeoutException:
         raise HTTPException(504, "alta.ru не отвечает")
@@ -148,17 +102,21 @@ async def get_route(src: str, dst: str):
         raise HTTPException(500, str(e))
 
 
+@app.get("/backup")
+async def backup(key: str = ""):
+    if not BACKUP_KEY or key != BACKUP_KEY:
+        raise HTTPException(403, "Доступ запрещён")
+    data = json.dumps(_cache, ensure_ascii=False, indent=2).encode("utf-8")
+    return Response(
+        content=data,
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=cache.json"}
+    )
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "cached_routes": len(_cache)}
-
-
-@app.get("/debug")
-async def debug(src: str, dst: str):
-    key = cache_key(src, dst)
-    hit = key in _cache
-    similar = [k for k in _cache.keys() if src.split()[0] in k or dst.split()[0] in k][:10]
-    return {"key": key, "hit": hit, "similar_keys": similar}
 
 
 @app.get("/")
