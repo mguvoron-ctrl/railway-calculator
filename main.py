@@ -18,6 +18,8 @@ ALTA_URL = "https://www.alta.ru/rail_tracking/engine.php"
 _cache: dict = {}
 
 def cache_key(src: str, dst: str) -> str:
+    src = " ".join(src.split())
+    dst = " ".join(dst.split())
     a, b = sorted([src.strip(), dst.strip()])
     return f"{a}||{b}"
 
