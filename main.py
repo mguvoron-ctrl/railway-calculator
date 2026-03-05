@@ -19,7 +19,7 @@ ALTA_URL = "https://www.alta.ru/rail_tracking/engine.php"
 CACHE_FILE = "cache.json"
 
 # Настройки почты
-EMAIL_TO = "e.a.voronov@yandex.ru"
+EMAIL_TO = "mguvoron@gmail.com"
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 
 
