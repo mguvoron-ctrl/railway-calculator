@@ -155,6 +155,7 @@ function MatrixTab({ onAddHistory, onAddStations }) {
       setResults({ ...newRes });
       setErrors({ ...newErr });
       setProgress({ done: Math.min(i + BATCH, pairs.length), total: pairs.length });
+      if (i + BATCH < pairs.length) await new Promise(r => setTimeout(r, 300));
     }
     setRunning(false);
   };
