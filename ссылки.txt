@@ -1,0 +1,10 @@
+🚂 ЖД Калькулятор — ссылки
+
+Сайт:
+https://railway-calculator.onrender.com
+
+Проверка кэша:
+https://railway-calculator.onrender.com/health
+
+Скачать бэкап:
+https://railway-calculator.onrender.com/backup?key=voronov19

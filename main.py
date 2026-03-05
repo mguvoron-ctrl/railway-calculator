@@ -80,24 +80,57 @@ def cache_subroutes(segments: list):
                 }
 
 
+async def fetch_alta(client: httpx.AsyncClient, src: str, dst: str) -> dict:
+    resp = await client.get(ALTA_URL, params={"action": "get_route", "src": src, "dst": dst})
+    resp.raise_for_status()
+    return resp.json()
+
+async def fetch_proxy(client: httpx.AsyncClient, proxy: str, src: str, dst: str) -> dict:
+    target = f"{ALTA_URL}?action=get_route&src={src}&dst={dst}"
+    resp = await client.get(f"{proxy}{target}")
+    resp.raise_for_status()
+    return resp.json()
+
+PROXIES = [
+    "https://corsproxy.io/?",
+    "https://api.codetabs.com/v1/proxy/?quest=",
+]
+
 @app.get("/api/route")
 async def get_route(src: str, dst: str):
     key = cache_key(src, dst)
     if key in _cache:
         return _cache[key]
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(ALTA_URL, params={"action": "get_route", "src": src, "dst": dst})
-            resp.raise_for_status()
-            data = resp.json()
+        async with httpx.AsyncClient(timeout=12) as client:
+            import asyncio
+            from urllib.parse import quote
+            src_enc = quote(src)
+            dst_enc = quote(dst)
+
+            tasks = [fetch_alta(client, src, dst)] + [
+                fetch_proxy(client, p, src_enc, dst_enc) for p in PROXIES
+            ]
+
+            # Гонка — берём первый успешный ответ
+            data = None
+            for coro in asyncio.as_completed(tasks):
+                try:
+                    data = await coro
+                    if data:
+                        break
+                except Exception:
+                    continue
+
+            if not data:
+                raise HTTPException(504, "alta.ru не отвечает")
+
             _cache[key] = data
             cache_subroutes(extract_segments(data))
             save_cache(_cache)
             return data
-    except httpx.TimeoutException:
-        raise HTTPException(504, "alta.ru не отвечает")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(e.response.status_code, "Ошибка alta.ru")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
