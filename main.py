@@ -112,12 +112,13 @@ async def get_route(src: str, dst: str):
                 fetch_proxy(client, p, src_enc, dst_enc) for p in PROXIES
             ]
 
-            # Гонка — берём первый успешный ответ
+            # Гонка — берём первый ответ у которого есть реальные перегоны
             data = None
             for coro in asyncio.as_completed(tasks):
                 try:
-                    data = await coro
-                    if data:
+                    candidate = await coro
+                    if candidate and extract_segments(candidate):
+                        data = candidate
                         break
                 except Exception:
                     continue
