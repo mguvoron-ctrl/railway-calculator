@@ -148,11 +148,7 @@ async def upload_cache(request: Request, key: str = ""):
         data = json.loads(body)
         _cache.clear()
         _cache.update(data)
-        global _dirty
-    _dirty += 1
-    if _dirty >= 10:
         save_cache(_cache)
-        _dirty = 0
         return {"status": "ok", "cached_routes": len(_cache)}
     except Exception as e:
         raise HTTPException(400, f"Ошибка: {e}")
