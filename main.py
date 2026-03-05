@@ -98,3 +98,11 @@ async def health():
 @app.get("/")
 async def root():
     return FileResponse("index.html")
+
+
+@app.get("/debug")
+async def debug(src: str, dst: str):
+    key = cache_key(src, dst)
+    hit = key in _cache
+    similar = [k for k in _cache.keys() if src.split()[0] in k or dst.split()[0] in k][:10]
+    return {"key": key, "hit": hit, "similar_keys": similar}
