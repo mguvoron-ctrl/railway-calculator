@@ -4,12 +4,6 @@ from fastapi.responses import FileResponse
 import httpx
 import json
 import os
-import smtplib
-import asyncio
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
 from datetime import datetime
 
 app = FastAPI(title="ЖД Калькулятор")
@@ -24,10 +18,9 @@ app.add_middleware(
 ALTA_URL = "https://www.alta.ru/rail_tracking/engine.php"
 CACHE_FILE = "cache.json"
 
-# Настройки почты — берём из переменных окружения Render
-EMAIL_FROM = os.getenv("EMAIL_FROM", "e.a.voronov@yandex.ru")
-EMAIL_TO = os.getenv("EMAIL_TO", "e.a.voronov@yandex.ru")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
+# Настройки почты
+EMAIL_TO = "e.a.voronov@yandex.ru"
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 
 
 def load_cache() -> dict:
@@ -47,29 +40,31 @@ def save_cache(cache: dict):
         pass
 
 def send_cache_backup():
-    """Отправляет cache.json на почту"""
-    if not EMAIL_PASSWORD:
+    """Отправляет cache.json на почту через Resend"""
+    if not RESEND_API_KEY:
         return
     try:
-        data = json.dumps(_cache, ensure_ascii=False, indent=2).encode("utf-8")
+        import urllib.request
         date_str = datetime.now().strftime("%Y-%m-%d")
-
-        msg = MIMEMultipart()
-        msg["From"] = EMAIL_FROM
-        msg["To"] = EMAIL_TO
-        msg["Subject"] = f"ЖД Калькулятор — резервная копия кэша {date_str}"
-
-        msg.attach(MIMEText(f"Резервная копия кэша маршрутов.\nМаршрутов в базе: {len(_cache)}", "plain", "utf-8"))
-
-        part = MIMEBase("application", "octet-stream")
-        part.set_payload(data)
-        encoders.encode_base64(part)
-        part.add_header("Content-Disposition", f"attachment; filename=cache_{date_str}.json")
-        msg.attach(part)
-
-        with smtplib.SMTP_SSL("smtp.yandex.ru", 465) as server:
-            server.login(EMAIL_FROM, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        cache_str = json.dumps(_cache, ensure_ascii=False, indent=2)
+        # Resend не поддерживает вложения на бесплатном плане — шлём текстом
+        body = f"Резервная копия кэша маршрутов.\nМаршрутов в базе: {len(_cache)}\n\n{cache_str[:50000]}"
+        payload = json.dumps({
+            "from": "onboarding@resend.dev",
+            "to": EMAIL_TO,
+            "subject": f"ЖД Калькулятор — резервная копия {date_str}",
+            "text": body
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.resend.com/emails",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            }
+        )
+        urllib.request.urlopen(req, timeout=10)
+        print(f"Бэкап отправлен на {EMAIL_TO}")
     except Exception as e:
         print(f"Ошибка отправки почты: {e}")
 
