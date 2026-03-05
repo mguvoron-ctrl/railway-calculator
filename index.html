@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🚂 ЖД Калькулятор</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" />
+  <style>
+    body { background: #030712; color: #f9fafb; }
+    .font-mono { font-family: 'Courier New', monospace; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+    const API = '';  // пустая строка = тот же сервер
+
+    // ============ STORAGE ============
+    function load(key, fallback) {
+      try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; }
+      catch { return fallback; }
+    }
+    function save(key, val) {
+      try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+    }
+
+    // ============ API ============
+    async function fetchRoute(src, dst, signal) {
+      const url = `${API}/api/route?src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}`;
+      const resp = await fetch(url, { signal });
+      if (!resp.ok) throw new Error(`Ошибка сервера: ${resp.status}`);
+      const data = await resp.json();
+      if (data.detail) throw new Error(data.detail);
+
+      const segments = [];
+      let totalDist = 0;
+      for (const key of Object.keys(data)) {
+        const item = data[key];
+        if (item && Array.isArray(item.route)) {
+          for (const s of item.route) {
+            if (s.rst !== undefined && s.st1_ecp && s.st2_ecp) {
+              segments.push({
+                st1_ecp: String(s.st1_ecp), st2_ecp: String(s.st2_ecp),
+                name1: s.name1 || '', name2: s.name2 || '',
+                rst: Number(s.rst),
+                road1: s.road1 || '', road2: s.road2 || '',
+                lat1: s.lat1 || '', lon1: s.lon1 || '',
+                lat2: s.lat2 || '', lon2: s.lon2 || '',
+              });
+              totalDist += Number(s.rst);
+            }
+          }
+        }
+      }
+      if (!segments.length) throw new Error('Маршрут не найден');
+      return { segments, totalDist };
+    }
+
+    // ============ APP ============
+    function App() {
+      const [tab, setTab] = useState('calc');
+      const [src, setSrc] = useState('');
+      const [dst, setDst] = useState('');
+      const [loading, setLoading] = useState(false);
+      const [result, setResult] = useState(null);
+      const [error, setError] = useState('');
+      const [showRoute, setShowRoute] = useState(false);
+
+      const [stations, setStations] = useState(() => new Map(load('rw_stations', [])));
+      const [history, setHistory] = useState(() => load('rw_history', []));
+      const [stSearch, setStSearch] = useState('');
+      const [stSort, setStSort] = useState('name');
+
+      const abortRef = useRef(null);
+
+      useEffect(() => {
+        const t = setTimeout(() => save('rw_stations', [...stations.entries()]), 500);
+        return () => clearTimeout(t);
+      }, [stations]);
+      useEffect(() => { save('rw_history', history); }, [history]);
+
+      const calculate = useCallback(async () => {
+        const from = src.trim(), to = dst.trim();
+        if (!from || !to) return;
+        abortRef.current?.abort();
+        abortRef.current = new AbortController();
+        setLoading(true); setError(''); setResult(null); setShowRoute(false);
+        const t0 = performance.now();
+        try {
+          const { segments, totalDist } = await fetchRoute(from, to, abortRef.current.signal);
+          const elapsed = (performance.now() - t0) / 1000;
+          setStations(prev => {
+            const next = new Map(prev);
+            let changed = false;
+            for (const s of segments) {
+              if (!next.has(s.st1_ecp)) { next.set(s.st1_ecp, { code: s.st1_ecp, name: s.name1, road: s.road1, lat: s.lat1, lon: s.lon1 }); changed = true; }
+              if (!next.has(s.st2_ecp)) { next.set(s.st2_ecp, { code: s.st2_ecp, name: s.name2, road: s.road2, lat: s.lat2, lon: s.lon2 }); changed = true; }
+            }
+            return changed ? next : prev;
+          });
+          setResult({ dist: totalDist, segs: segments.length, time: elapsed, route: segments });
+          setHistory(prev => [{ from, to, distance: totalDist, segments: segments.length, time: elapsed.toFixed(1) + 'с', date: new Date().toLocaleString('ru') }, ...prev].slice(0, 500));
+        } catch (e) {
+          if (abortRef.current?.signal.aborted) return;
+          setError(e.message || String(e));
+        } finally { setLoading(false); }
+      }, [src, dst]);
+
+      const exportCSV = useCallback(() => {
+        const rows = [['Код', 'Станция', 'Дорога', 'Lat', 'Lon'], ...[...stations.values()].map(s => [s.code, s.name, s.road, s.lat, s.lon])];
+        const blob = new Blob(['\ufeff' + rows.map(r => r.join(';')).join('\n')], { type: 'text/csv;charset=utf-8' });
+        const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'stations.csv' });
+        a.click(); URL.revokeObjectURL(a.href);
+      }, [stations]);
+
+      const filteredSt = useMemo(() => {
+        const q = stSearch.toLowerCase();
+        return [...stations.values()]
+          .filter(s => !q || s.name.toLowerCase().includes(q) || s.code.includes(q) || s.road.toLowerCase().includes(q))
+          .sort((a, b) => stSort === 'code' ? a.code.localeCompare(b.code) : stSort === 'road' ? a.road.localeCompare(b.road) : a.name.localeCompare(b.name));
+      }, [stations, stSearch, stSort]);
+
+      const tabBtn = (key, label) => (
+        <button key={key} onClick={() => setTab(key)}
+          className={`px-3 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${tab === key ? 'border-blue-500 text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
+        >{label}</button>
+      );
+
+      return (
+        <div style={{minHeight:'100vh',background:'#030712',color:'#f9fafb'}}>
+          <header style={{background:'#111827',borderBottom:'1px solid #1f2937',position:'sticky',top:0,zIndex:50}}>
+            <div style={{maxWidth:900,margin:'0 auto',padding:'10px 16px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <span style={{fontSize:22}}>🚂</span>
+                <span style={{fontWeight:700,fontSize:15}}>ЖД Калькулятор</span>
+              </div>
+              <div style={{display:'flex',gap:6,fontSize:12}}>
+                <span style={{background:'#052e16',padding:'2px 8px',borderRadius:6,color:'#86efac'}}><b>{stations.size}</b> ст.</span>
+                <span style={{background:'#2e1065',padding:'2px 8px',borderRadius:6,color:'#c4b5fd'}}><b>{history.length}</b> запросов</span>
+              </div>
+            </div>
+          </header>
+
+          <nav style={{background:'rgba(17,24,39,0.5)',borderBottom:'1px solid #1f2937'}}>
+            <div style={{maxWidth:900,margin:'0 auto',padding:'0 16px',display:'flex',gap:2,overflowX:'auto'}}>
+              {tabBtn('calc', '📐 Расчёт')}
+              {tabBtn('stations', `🏗 Станции (${stations.size})`)}
+              {tabBtn('history', `📋 История (${history.length})`)}
+            </div>
+          </nav>
+
+          <main style={{maxWidth:900,margin:'0 auto',padding:'20px 16px'}}>
+
+            {tab === 'calc' && (
+              <div style={{display:'flex',flexDirection:'column',gap:16}}>
+                <div style={{background:'#111827',borderRadius:12,padding:16,border:'1px solid #1f2937'}}>
+                  <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+                    <div style={{flex:1,minWidth:200}}>
+                      <label style={{fontSize:12,color:'#6b7280',display:'block',marginBottom:4}}>Отправление</label>
+                      <input value={src} onChange={e => setSrc(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && document.getElementById('dst')?.focus()}
+                        placeholder="17640 Новосмоленская"
+                        style={{width:'100%',background:'#1f2937',border:'1px solid #374151',borderRadius:8,padding:'10px 14px',color:'#fff',fontSize:16,outline:'none',boxSizing:'border-box'}} />
+                    </div>
+                    <button onClick={() => { setSrc(dst); setDst(src); }} title="Поменять местами"
+                      style={{alignSelf:'flex-end',padding:'10px 12px',background:'#1f2937',border:'none',borderRadius:8,color:'#9ca3af',fontSize:20,cursor:'pointer'}}>⇅</button>
+                    <div style={{flex:1,minWidth:200}}>
+                      <label style={{fontSize:12,color:'#6b7280',display:'block',marginBottom:4}}>Назначение</label>
+                      <input id="dst" value={dst} onChange={e => setDst(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && calculate()}
+                        placeholder="81850 Новоабзаково"
+                        style={{width:'100%',background:'#1f2937',border:'1px solid #374151',borderRadius:8,padding:'10px 14px',color:'#fff',fontSize:16,outline:'none',boxSizing:'border-box'}} />
+                    </div>
+                  </div>
+                  <button onClick={calculate} disabled={loading || !src.trim() || !dst.trim()}
+                    style={{marginTop:12,width:'100%',padding:'12px',background: loading || !src.trim() || !dst.trim() ? '#374151' : '#2563eb',border:'none',borderRadius:8,color: loading || !src.trim() || !dst.trim() ? '#6b7280' : '#fff',fontWeight:700,fontSize:16,cursor: loading || !src.trim() || !dst.trim() ? 'default' : 'pointer',transition:'background 0.2s'}}>
+                    {loading ? '⏳ Расчёт...' : '🚀 Рассчитать'}
+                  </button>
+                </div>
+
+                {result && (
+                  <div style={{background:'#111827',borderRadius:12,border:'1px solid #1f2937',overflow:'hidden'}}>
+                    <div style={{padding:'20px',textAlign:'center'}}>
+                      <div style={{fontSize:48,fontWeight:900,color:'#4ade80'}}>{result.dist.toLocaleString()} км</div>
+                      <div style={{fontSize:13,color:'#6b7280',marginTop:6}}>{result.segs} перегонов • {result.time.toFixed(1)}с</div>
+                    </div>
+                    <div style={{borderTop:'1px solid #1f2937'}}>
+                      <button onClick={() => setShowRoute(v => !v)}
+                        style={{width:'100%',padding:'8px 20px',background:'none',border:'none',color:'#9ca3af',cursor:'pointer',display:'flex',justifyContent:'space-between',fontSize:13}}>
+                        <span>📍 Маршрут ({result.route.length})</span><span>{showRoute ? '▲' : '▼'}</span>
+                      </button>
+                      {showRoute && (
+                        <div style={{maxHeight:320,overflowY:'auto'}}>
+                          <table style={{width:'100%',fontSize:11,borderCollapse:'collapse'}}>
+                            <thead style={{background:'rgba(31,41,55,0.5)',position:'sticky',top:0}}>
+                              <tr>
+                                {['#','Код','Станция','→','Код','Станция','Км'].map((h,i) => (
+                                  <th key={i} style={{padding:'4px 6px',color:'#6b7280',textAlign: i===6?'right':'left',fontWeight:500}}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {result.route.map((s, i) => (
+                                <tr key={i} style={{borderTop:'1px solid rgba(31,41,55,0.5)'}}>
+                                  <td style={{padding:'3px 6px',color:'#4b5563'}}>{i+1}</td>
+                                  <td style={{padding:'3px 6px',color:'#6b7280',fontFamily:'monospace'}}>{s.st1_ecp}</td>
+                                  <td style={{padding:'3px 6px',color:'#d1d5db'}}>{s.name1}</td>
+                                  <td style={{padding:'3px 2px',color:'#4b5563'}}>→</td>
+                                  <td style={{padding:'3px 6px',color:'#6b7280',fontFamily:'monospace'}}>{s.st2_ecp}</td>
+                                  <td style={{padding:'3px 6px',color:'#d1d5db'}}>{s.name2}</td>
+                                  <td style={{padding:'3px 6px',color:'#fbbf24',textAlign:'right',fontFamily:'monospace'}}>{s.rst}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {error && <div style={{background:'rgba(127,29,29,0.3)',border:'1px solid #7f1d1d',borderRadius:12,padding:'12px 20px',color:'#fca5a5'}}>{error}</div>}
+              </div>
+            )}
+
+            {tab === 'stations' && (
+              <div style={{display:'flex',flexDirection:'column',gap:16}}>
+                <div style={{background:'#111827',borderRadius:12,padding:12,border:'1px solid #1f2937',display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+                  <input value={stSearch} onChange={e => setStSearch(e.target.value)} placeholder="🔍 Поиск..."
+                    style={{flex:1,minWidth:180,background:'#1f2937',border:'1px solid #374151',borderRadius:8,padding:'6px 12px',color:'#fff',fontSize:13,outline:'none'}} />
+                  <select value={stSort} onChange={e => setStSort(e.target.value)}
+                    style={{background:'#1f2937',border:'1px solid #374151',borderRadius:8,padding:'6px 8px',color:'#fff',fontSize:13}}>
+                    <option value="name">Имя</option>
+                    <option value="code">Код</option>
+                    <option value="road">Дорога</option>
+                  </select>
+                  <button onClick={exportCSV} style={{padding:'6px 12px',background:'#14532d',border:'none',borderRadius:8,color:'#fff',fontSize:13,cursor:'pointer'}}>CSV</button>
+                </div>
+                <div style={{background:'#111827',borderRadius:12,border:'1px solid #1f2937',overflow:'hidden'}}>
+                  <div style={{maxHeight:'60vh',overflowY:'auto'}}>
+                    <table style={{width:'100%',fontSize:11,borderCollapse:'collapse'}}>
+                      <thead style={{background:'#1f2937',position:'sticky',top:0}}>
+                        <tr>
+                          {['Код','Станция','Дорога','Координаты','⚡'].map((h,i) => (
+                            <th key={i} style={{padding:'6px 8px',color:'#9ca3af',textAlign:'left',fontWeight:500}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredSt.slice(0,500).map(s => (
+                          <tr key={s.code} style={{borderTop:'1px solid rgba(31,41,55,0.5)'}}>
+                            <td style={{padding:'4px 8px',fontFamily:'monospace',color:'#60a5fa'}}>{s.code}</td>
+                            <td style={{padding:'4px 8px',color:'#e5e7eb'}}>{s.name}</td>
+                            <td style={{padding:'4px 8px',color:'#6b7280'}}>{s.road}</td>
+                            <td style={{padding:'4px 8px',color:'#4b5563',fontFamily:'monospace',fontSize:10}}>{s.lat && s.lon ? `${s.lat}, ${s.lon}` : '—'}</td>
+                            <td style={{padding:'4px 8px',textAlign:'center'}}>
+                              <button onClick={() => { setSrc(`${s.code} ${s.name}`); setTab('calc'); }} style={{background:'none',border:'none',cursor:'pointer',marginRight:4}} title="Отправление">📤</button>
+                              <button onClick={() => { setDst(`${s.code} ${s.name}`); setTab('calc'); }} style={{background:'none',border:'none',cursor:'pointer'}} title="Назначение">📥</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {filteredSt.length > 500 && <div style={{padding:'8px',textAlign:'center',fontSize:12,color:'#6b7280'}}>Показано 500 из {filteredSt.length}</div>}
+                  {filteredSt.length === 0 && <div style={{padding:'32px',textAlign:'center',color:'#4b5563'}}>{stations.size === 0 ? 'База пуста — сделайте первый расчёт' : 'Не найдено'}</div>}
+                </div>
+              </div>
+            )}
+
+            {tab === 'history' && (
+              <div style={{background:'#111827',borderRadius:12,border:'1px solid #1f2937',overflow:'hidden'}}>
+                <div style={{maxHeight:'70vh',overflowY:'auto'}}>
+                  <table style={{width:'100%',fontSize:13,borderCollapse:'collapse'}}>
+                    <thead style={{background:'#1f2937',position:'sticky',top:0}}>
+                      <tr>
+                        {['Дата','Откуда','Куда','Км','Перег.','Время'].map((h,i) => (
+                          <th key={i} style={{padding:'8px 12px',color:'#9ca3af',textAlign: i>=3?'right':'left',fontWeight:500}}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {history.map((h, i) => (
+                        <tr key={i} style={{borderTop:'1px solid rgba(31,41,55,0.5)',cursor:'pointer'}}
+                          onClick={() => { setSrc(h.from); setDst(h.to); setTab('calc'); }}>
+                          <td style={{padding:'8px 12px',color:'#4b5563',fontSize:11}}>{h.date}</td>
+                          <td style={{padding:'8px 12px',color:'#d1d5db'}}>{h.from}</td>
+                          <td style={{padding:'8px 12px',color:'#d1d5db'}}>{h.to}</td>
+                          <td style={{padding:'8px 12px',textAlign:'right',fontFamily:'monospace',color:'#4ade80',fontWeight:700}}>{h.distance.toLocaleString()}</td>
+                          <td style={{padding:'8px 12px',textAlign:'right',color:'#6b7280'}}>{h.segments}</td>
+                          <td style={{padding:'8px 12px',textAlign:'right',color:'#4b5563'}}>{h.time}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {history.length === 0 && <div style={{padding:'32px',textAlign:'center',color:'#4b5563'}}>Пусто</div>}
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

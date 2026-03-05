@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import httpx
 
 app = FastAPI(title="ЖД Калькулятор")
@@ -37,3 +38,8 @@ async def get_route(src: str, dst: str):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/")
+async def root():
+    return FileResponse("index.html")
