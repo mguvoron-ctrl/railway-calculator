@@ -153,22 +153,49 @@ async def get_route(src: str, dst: str):
     # 2. Проверяем Redis
     cached = await redis_get(key)
     if cached:
-        data = json.loads(cached)
-        _cache[key] = data
-        return data
+        try:
+            data = json.loads(cached) if isinstance(cached, str) else cached
+            # Проверяем что это валидный маршрут
+            if isinstance(data, dict) and any(
+                isinstance(v, dict) and "route" in v for v in data.values()
+            ):
+                _cache[key] = data
+                return data
+        except Exception:
+            pass
 
     # 3. Запрашиваем alta.ru
     data = await fetch_route(src, dst)
     if not data:
         raise HTTPException(504, "Маршрут не найден — alta.ru не ответил")
 
-    # Сохраняем основной маршрут в Redis (в фоне)
+    # Сохраняем в память
     _cache[key] = data
+    old_keys = set(_cache.keys())
     expand_cache(extract_segments(data))
-    asyncio.create_task(redis_set(key, json.dumps(data, ensure_ascii=False)))
+    new_keys = set(_cache.keys()) - old_keys
+    new_keys.add(key)
+    # Сохраняем все новые ключи в Redis батчем в фоне
+    asyncio.create_task(redis_pipeline_set({k: json.dumps(_cache[k], ensure_ascii=False) for k in new_keys}))
     return data
 
 _redis_save_queue: set = set()
+
+async def redis_pipeline_set(items: dict) -> None:
+    """Сохранить много ключей одним pipeline запросом."""
+    if not REDIS_URL or not items:
+        return
+    try:
+        commands = [["SET", k, v] for k, v in items.items()]
+        async with httpx.AsyncClient(timeout=15) as client:
+            await client.post(
+                f"{REDIS_URL}/pipeline",
+                headers={"Authorization": f"Bearer {REDIS_TOKEN}",
+                         "Content-Type": "application/json"},
+                content=json.dumps(commands)
+            )
+    except Exception:
+        pass
 
 
 async def redis_mget(keys: list) -> list:
