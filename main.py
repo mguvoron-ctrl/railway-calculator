@@ -57,17 +57,27 @@ async def redis_set(key: str, value: str) -> None:
         pass
 
 async def redis_keys(pattern: str = "*") -> list:
+    """Получить все ключи через SCAN (обходит лимит KEYS)."""
     if not REDIS_URL:
         return []
+    all_keys = []
+    cursor = 0
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(
-                f"{REDIS_URL}/keys/{pattern}",
-                headers={"Authorization": f"Bearer {REDIS_TOKEN}"}
-            )
-            return r.json().get("result", [])
+        async with httpx.AsyncClient(timeout=10) as client:
+            while True:
+                r = await client.get(
+                    f"{REDIS_URL}/scan/{cursor}",
+                    params={"match": pattern, "count": 500},
+                    headers={"Authorization": f"Bearer {REDIS_TOKEN}"}
+                )
+                result = r.json().get("result", [0, []])
+                cursor = int(result[0])
+                all_keys.extend(result[1])
+                if cursor == 0:
+                    break
     except Exception:
-        return []
+        pass
+    return all_keys
 
 # ============ LOCAL CACHE (in-memory) ============
 _cache: dict = {}
