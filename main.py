@@ -152,22 +152,31 @@ async def get_route(src: str, dst: str):
     if not data:
         raise HTTPException(504, "Маршрут не найден — alta.ru не ответил")
 
-    # Сохраняем в память и Redis
+    # Сохраняем основной маршрут в Redis (в фоне)
     _cache[key] = data
     expand_cache(extract_segments(data))
-
-    # Сохраняем все новые подмаршруты в Redis асинхронно
-    asyncio.create_task(_save_all_new_to_redis())
+    asyncio.create_task(redis_set(key, json.dumps(data, ensure_ascii=False)))
     return data
 
 _redis_save_queue: set = set()
 
-async def _save_all_new_to_redis():
-    """Сохраняет новые ключи в Redis в фоне."""
-    keys_to_save = [k for k in _cache if k not in _redis_save_queue]
-    for key in keys_to_save:
-        _redis_save_queue.add(key)
-        await redis_set(key, json.dumps(_cache[key], ensure_ascii=False))
+
+async def redis_mget(keys: list) -> list:
+    """Получить несколько ключей за один запрос."""
+    if not REDIS_URL or not keys:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"{REDIS_URL}/pipeline",
+                headers={"Authorization": f"Bearer {REDIS_TOKEN}",
+                         "Content-Type": "application/json"},
+                content=json.dumps([["GET", k] for k in keys])
+            )
+            results = r.json()
+            return [item.get("result") for item in results]
+    except Exception:
+        return [None] * len(keys)
 
 
 @app.on_event("startup")
@@ -178,13 +187,11 @@ async def startup():
     print("Загружаю кэш из Redis...")
     keys = await redis_keys("*")
     print(f"Найдено {len(keys)} ключей в Redis")
-    # Загружаем батчами по 50
-    BATCH = 50
+    BATCH = 100
     for i in range(0, len(keys), BATCH):
         batch = keys[i:i+BATCH]
-        tasks = [redis_get(k) for k in batch]
-        results = await asyncio.gather(*tasks)
-        for k, v in zip(batch, results):
+        values = await redis_mget(batch)
+        for k, v in zip(batch, values):
             if v:
                 try:
                     _cache[k] = json.loads(v)
