@@ -155,10 +155,7 @@ async def get_route(src: str, dst: str):
     if cached:
         try:
             data = json.loads(cached) if isinstance(cached, str) else cached
-            # Проверяем что это валидный маршрут
-            if isinstance(data, dict) and any(
-                isinstance(v, dict) and "route" in v for v in data.values()
-            ):
+            if isinstance(data, dict):
                 _cache[key] = data
                 return data
         except Exception:
